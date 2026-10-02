@@ -266,6 +266,13 @@ def main():
     with Image.open(out2) as im:
         check(im.size == (2400, 1800), f"无覆盖走批量: {im.size}")
 
+    # --- 不裁剪覆盖（该图跳过裁剪） ---
+    key0 = str(files[0].resolve()).lower()
+    s9.crop_overrides[key0] = P.CropOptions(enabled=False)
+    out3, _ = P.process_file(files[0], s9, out, 3)   # 批量 0.5 被跳过 → 全图
+    with Image.open(out3) as im:
+        check(im.size == (800, 600), f"不裁剪覆盖生效: {im.size}")
+
     print(f"\n全部 {ok} 项测试通过 ✅  测试目录: {tmp}")
 
 

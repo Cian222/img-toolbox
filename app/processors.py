@@ -414,8 +414,8 @@ def process_file(path, settings: ProcessSettings, out_dir,
 
     crop_opt = settings.crop
     override = settings.crop_overrides.get(str(src.resolve()).lower())
-    if override is not None and override.enabled:
-        crop_opt = override            # 单独裁剪优先于批量
+    if override is not None:
+        crop_opt = override            # 单独区域 / 不裁剪，均优先于批量
     if crop_opt.enabled:
         img = apply_crop(img, crop_opt)
     if settings.resize.enabled:

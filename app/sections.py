@@ -182,6 +182,8 @@ class FilePanel(CardWidget):
         else:
             self.setMinimumWidth(280)  # 放进可拖动分割条时不锁宽度
         self._files: list[Path] = []
+        self._skipped: set = set()     # 跳过处理的 key 集合
+        self._marks: dict = {}         # key → 裁剪标记（✂ / ⊘）
         v = QVBoxLayout(self)
         v.setContentsMargins(14, 14, 14, 14)
         v.setSpacing(8)
@@ -216,25 +218,103 @@ class FilePanel(CardWidget):
         )
         self.file_list.itemSelectionChanged.connect(self.selection_changed.emit)
         self.file_list.paths_dropped.connect(self.add_paths)
+        self.file_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.file_list.customContextMenuRequested.connect(self._show_list_menu)
         v.addWidget(self.file_list, 1)
 
-        btns = QHBoxLayout()
+        row1 = QHBoxLayout()
         b1 = PushButton("添加文件")
         b2 = PushButton("添加文件夹")
-        b3 = PushButton("清空")
         b1.clicked.connect(self._add_files_dialog)
         b2.clicked.connect(self._add_folder_dialog)
-        b3.clicked.connect(self._clear_files)
-        for b in (b1, b2, b3):
-            btns.addWidget(b)
-        v.addLayout(btns)
+        row1.addWidget(b1, 1)
+        row1.addWidget(b2, 1)
+        v.addLayout(row1)
 
-        v.addWidget(CaptionLabel("支持把文件 / 文件夹直接拖进来"))
+        row2 = QHBoxLayout()
+        self.skip_btn = PushButton("跳过选中")
+        self.skip_btn.setToolTip("标记/取消这张图：跳过后任何功能都不处理它")
+        self.skip_btn.clicked.connect(lambda: self.toggle_skip())
+        b3 = PushButton("清空")
+        b3.clicked.connect(self._clear_files)
+        row2.addWidget(self.skip_btn, 1)
+        row2.addWidget(b3, 1)
+        v.addLayout(row2)
+
+        v.addWidget(CaptionLabel("支持拖入文件 / 文件夹；右键列表项可跳过/恢复处理"))
 
     # ---- 列表 ----
 
     def files(self) -> list[Path]:
-        return list(self._files)
+        """参与处理的文件（跳过的不含在内）。"""
+        return [p for p in self._files
+                if str(p.resolve()).lower() not in self._skipped]
+
+    def is_skipped(self, path) -> bool:
+        return str(Path(path).resolve()).lower() in self._skipped
+
+    def toggle_skip(self, path=None) -> bool:
+        """切换某张图片（默认当前选中）的跳过状态，返回是否跳过。"""
+        path = path or self.current_path()
+        if not path:
+            return False
+        p = Path(path)
+        key = str(p.resolve()).lower()
+        if key in self._skipped:
+            self._skipped.discard(key)
+        else:
+            self._skipped.add(key)
+        self._refresh_items()
+        self._refresh_count()
+        return key in self._skipped
+
+    def set_file_mark(self, path: str, mark: str):
+        """显示裁剪标记（✂ / ⊘），由 CropSection 驱动。"""
+        key = str(Path(path).resolve()).lower() if path else ""
+        if not key:
+            return
+        if mark:
+            self._marks[key] = mark
+        else:
+            self._marks.pop(key, None)
+        self._refresh_items()
+
+    def _item_text(self, p: Path) -> str:
+        key = str(p.resolve()).lower()
+        kb = p.stat().st_size / 1024
+        extra = (" [跳过]" if key in self._skipped else "") + self._marks.get(key, "")
+        return f"{p.name}   ({kb:.0f} KB){extra}"
+
+    def _refresh_items(self):
+        for i in range(self.file_list.count()):
+            item = self.file_list.item(i)
+            p = Path(item.data(Qt.UserRole))
+            if not p.exists():
+                continue
+            item.setText(self._item_text(p))
+            item.setForeground(QColor("#9a9a9a")
+                               if str(p.resolve()).lower() in self._skipped
+                               else self.file_list.palette().text())
+
+    def _refresh_count(self):
+        keys = {str(p.resolve()).lower() for p in self._files}
+        skipped = len(self._skipped & keys)
+        txt = f"共 {len(self._files)} 个文件"
+        if skipped:
+            txt += f"（将处理 {len(self._files) - skipped}，跳过 {skipped}）"
+        self.count_label.setText(txt)
+
+    def _show_list_menu(self, pos):
+        item = self.file_list.itemAt(pos)
+        if item is None:
+            return
+        from PySide6.QtWidgets import QMenu
+        p = Path(item.data(Qt.UserRole))
+        menu = QMenu(self)
+        act = menu.addAction("恢复处理" if self.is_skipped(p)
+                             else "跳过处理（任何功能都不处理这张）")
+        act.triggered.connect(lambda: self.toggle_skip(str(p)))
+        menu.exec(self.file_list.mapToGlobal(pos))
 
     def current_path(self) -> str | None:
         if self.file_list.selectedItems():
@@ -262,11 +342,10 @@ class FilePanel(CardWidget):
                 continue
             existing.add(key)
             self._files.append(p)
-            kb = p.stat().st_size / 1024
-            item = QListWidgetItem(f"{p.name}   ({kb:.0f} KB)")
+            item = QListWidgetItem(self._item_text(p))
             item.setData(Qt.UserRole, str(p))
             self.file_list.addItem(item)
-        self.count_label.setText(f"共 {len(self._files)} 个文件")
+        self._refresh_count()
         if self._files and not self.file_list.selectedItems():
             self.file_list.setCurrentRow(0)
         self.selection_changed.emit()
@@ -274,7 +353,7 @@ class FilePanel(CardWidget):
     def _clear_files(self):
         self._files.clear()
         self.file_list.clear()
-        self.count_label.setText("共 0 个文件")
+        self._refresh_count()
         self.selection_changed.emit()
 
     def reference_image(self) -> Image.Image | None:
@@ -494,24 +573,41 @@ class ResizeSection(SectionBase):
 
 
 class CropSection(SectionBase):
+    file_mark_changed = Signal(str, str)  # 小写路径, 标记（" ✂" / " ⊘" / ""）
+
     def __init__(self, get_reference_image=None, get_reference_path=None,
                  on_change=None):
         super().__init__("裁剪")
         self._get_reference_image = get_reference_image
         self._get_reference_path = get_reference_path
         self._on_change = on_change
-        self._rect: tuple | None = None               # 批量区域（相对坐标）
-        self._file_rects: dict = {}                   # 路径小写 → 相对区域（单独裁剪）
+        self._batch_rect: tuple | None = None   # 批量区域（相对坐标）
+        self._own_rects: dict = {}              # key → 单独区域（值可为 None=尚未画框）
+        self._skip: set = set()                 # 不裁剪的 key 集合
         self._ref_img: Image.Image | None = None
 
-        self.scope_combo = ComboBox()
-        self.scope_combo.addItems(["全部图片（批量）", "仅选中图片"])
-        self.scope_combo.setToolTip(
-            "批量：画一次框，列表里所有图按同一相对区域裁剪\n"
-            "仅选中：画框只对当前选中的这张生效，各图区域独立记忆")
-        self.scope_combo.currentIndexChanged.connect(self._on_scope_changed)
-        self.row("应用范围", self.scope_combo)
+        # 当前图片状态（三选一）
+        self.state_combo = ComboBox()
+        self.state_combo.addItems(["跟随批量", "单独区域", "不裁剪"])
+        self.state_combo.setToolTip(
+            "跟随批量：使用下方批量裁剪框\n"
+            "单独区域：这张用自己的框（点“画框…”）\n"
+            "不裁剪：这张跳过裁剪")
+        self.state_combo.currentIndexChanged.connect(self._on_state_changed)
+        self.row("当前图片", self.state_combo)
 
+        # 批量裁剪框
+        self.batch_draw_btn = PushButton("画框…")
+        self.batch_clear_btn = PushButton("清除")
+        self.batch_draw_btn.clicked.connect(lambda: self._draw("batch"))
+        self.batch_clear_btn.clicked.connect(self._clear_batch)
+        self.row("批量裁剪框",
+                 hwrap(self.batch_draw_btn, self.batch_clear_btn,
+                       stretch_first=False))
+        self.batch_info = CaptionLabel("未设置")
+        self.add(self.batch_info)
+
+        # 比例 / 像素预设
         self.ratio_combo = ComboBox()
         manage_btn = PushButton("管理预设…")
         manage_btn.clicked.connect(self._open_manage_presets)
@@ -520,19 +616,23 @@ class CropSection(SectionBase):
         self.size_combo = ComboBox()
         self.row("像素预设", self.size_combo)
 
-        crop_btn = PushButton("手动裁剪…")
-        clear_btn = PushButton("清除裁剪")
-        crop_btn.clicked.connect(self._open_crop_dialog)
-        clear_btn.clicked.connect(self.clear_crop)
-        btns = QWidget()
-        bh = QHBoxLayout(btns)
-        bh.setContentsMargins(0, 0, 0, 0)
-        bh.setSpacing(8)
-        bh.addWidget(crop_btn)
-        bh.addWidget(clear_btn)
-        bh.addStretch(1)
-        self.add(btns)
+        # 当前图片自己的框（仅“单独区域”状态显示）
+        self.own_row = QWidget()
+        oh = QHBoxLayout(self.own_row)
+        oh.setContentsMargins(0, 0, 0, 0)
+        oh.setSpacing(8)
+        self.own_draw_btn = PushButton("画框…")
+        self.own_clear_btn = PushButton("清除")
+        self.own_draw_btn.clicked.connect(lambda: self._draw("own"))
+        self.own_clear_btn.clicked.connect(self._clear_own)
+        oh.addWidget(self.own_draw_btn)
+        oh.addWidget(self.own_clear_btn)
+        oh.addStretch(1)
+        self.add(self.own_row)
+        self.own_info = CaptionLabel("尚未画框")
+        self.add(self.own_info)
 
+        # 生效区域缩略图 + 汇总信息
         info_row = QHBoxLayout()
         info_row.setSpacing(10)
         self.preview_label = QLabel()
@@ -548,43 +648,155 @@ class CropSection(SectionBase):
         self.body_v.addLayout(info_row)  # 放进折叠体，折叠时一起隐藏
 
         tip = CaptionLabel(
-            "批量模式：所有图按同一相对区域裁剪；仅选中模式：画框只对当前这张生效"
-            "（单独设置优先于批量）；选了像素预设时统一缩放到该尺寸，比例预设锁定框形状")
+            "每张图三选一：跟随批量 / 单独区域（只对这张生效）/ 不裁剪。"
+            "选了像素预设时统一缩放到该尺寸，比例预设锁定框形状，"
+            "切换预设时已有区域自动重适配。文件列表标记：✂ 单独区域，⊘ 不裁剪")
         tip.setWordWrap(True)
         self.add(tip)
         self.refresh_presets()
-        self._update_info()
-        # 切换比例/像素预设时，已有裁剪区域按新比例自动重新适配
+        self._update_all()
         self.ratio_combo.currentIndexChanged.connect(self._on_ratio_changed)
         self.size_combo.currentIndexChanged.connect(self._on_ratio_changed)
 
-    def _on_scope_changed(self):
-        self._update_info()
+    # ---- 状态与区域 ----
+
+    def _key(self) -> str:
+        path = self._get_reference_path() if self._get_reference_path else None
+        return str(Path(path).resolve()).lower() if path else ""
+
+    def _state_of(self, key: str) -> int:
+        if key in self._skip:
+            return 2
+        if key in self._own_rects:
+            return 1
+        return 0
+
+    def _effective_rect(self, key: str):
+        """返回 (区域或 None, 是否为单独状态)。"""
+        if key in self._skip:
+            return None, False
+        if key in self._own_rects:
+            return self._own_rects[key], True
+        return self._batch_rect, False
+
+    def set_reference(self, img: Image.Image | None):
+        self._ref_img = img
+
+    def refresh_for_selection(self):
+        """文件列表选中变化时：刷新参考图与当前图片状态显示。"""
+        self.set_reference(self._get_reference_image() if self._get_reference_image else None)
+        self._update_all()
+
+    def set_rect(self, rect: tuple | None):
+        """设置批量裁剪区域（脚本/测试用）。"""
+        self._batch_rect = rect
+        self._update_all()
         self._notify()
 
-    def _on_ratio_changed(self):
-        if not self._rect:
-            self._update_info()
+    def set_file_rect(self, path: str, rect: tuple | None):
+        """设置某张图片的单独区域，并自动切到“单独区域”状态。"""
+        key = str(Path(path).resolve()).lower() if path else ""
+        if not key:
             return
+        if rect is not None:
+            self._own_rects[key] = rect
+            self._skip.discard(key)
+        else:
+            self._own_rects.pop(key, None)
+        self._emit_mark(key)
+        self._update_all()
+        self._notify()
+
+    def set_file_state(self, path: str, state: str):
+        """设置某张图片的裁剪状态：follow / own / skip（脚本/测试用）。"""
+        key = str(Path(path).resolve()).lower() if path else ""
+        if not key:
+            return
+        self._skip.discard(key)
+        self._own_rects.pop(key, None)
+        if state == "skip":
+            self._skip.add(key)
+        elif state == "own":
+            self._own_rects[key] = None
+        self._emit_mark(key)
+        self._update_all()
+        self._notify()
+
+    def _emit_mark(self, key: str):
+        if key in self._skip:
+            mark = " ⊘"
+        elif key in self._own_rects:
+            mark = " ✂"
+        else:
+            mark = ""
+        self.file_mark_changed.emit(key, mark)
+
+    def _on_state_changed(self, idx: int):
+        """当前图片三态切换：清理旧状态并记录新状态。"""
+        key = self._key()
+        if not key:
+            self._update_all()
+            return
+        self._skip.discard(key)
+        self._own_rects.pop(key, None)
+        if idx == 2:                 # 不裁剪
+            self._skip.add(key)
+        self._emit_mark(key)
+        self._update_all()
+        self._notify()
+
+    def _notify(self):
+        if self._on_change:
+            self._on_change()
+
+    # ---- 按钮 ----
+
+    def _draw(self, mode: str):
+        per_file = mode == "own"
+        img = self._get_reference_image() if self._get_reference_image else None
+        if img is None:
+            InfoBar.warning(title="没有图片", content="请先添加图片，裁剪需要一张参考图",
+                            orient=Qt.Horizontal, isClosable=True,
+                            position=InfoBarPosition.TOP, duration=3000,
+                            parent=self.window())
+            return
+        key = self._key()
+        if per_file and not key:
+            InfoBar.warning(title="未选中图片", content="请在左侧列表选中要单独裁剪的图片",
+                            orient=Qt.Horizontal, isClosable=True,
+                            position=InfoBarPosition.TOP, duration=3000,
+                            parent=self.window())
+            return
+        self._ref_img = img
         ratio = self.current_ratio()
         pt = self.current_pixel_target()
         if pt:
             ratio = pt[0] / pt[1]
-        if not ratio or not self._ref_img:
-            self._update_info()
-            return
-        W, H = self._ref_img.size
-        x, y, w, h = self._rect
-        pw, ph = w * W, h * H
-        if pw / max(ph, 1e-6) > ratio:
-            pw = ph * ratio          # 太宽 → 收缩宽度
-        else:
-            ph = pw / ratio          # 太高 → 收缩高度
-        nw, nh = pw / W, ph / H
-        cx, cy = x + w / 2, y + h / 2
-        nx = min(max(cx - nw / 2, 0.0), 1 - nw)
-        ny = min(max(cy - nh / 2, 0.0), 1 - nh)
-        self.set_rect((nx, ny, nw, nh))
+        init = self._own_rects.get(key) if per_file else self._batch_rect
+        dlg = CropDialog(img, ratio=ratio, pixel_target=pt,
+                         init_rel=init, parent=self.window())
+        if dlg.exec():
+            rect = dlg.rect_rel()
+            if per_file:
+                self._own_rects[key] = rect
+                self._skip.discard(key)
+                self._emit_mark(key)
+            else:
+                self._batch_rect = rect
+            self._update_all()
+            self._notify()
+
+    def _clear_batch(self):
+        self._batch_rect = None
+        self._update_all()
+        self._notify()
+
+    def _clear_own(self):
+        key = self._key()
+        if key:
+            self._own_rects.pop(key, None)
+        self._update_all()
+        self._notify()
 
     # ---- 预设 ----
 
@@ -628,127 +840,87 @@ class CropSection(SectionBase):
         val = self._size_values[idx] if 0 <= idx < len(self._size_values) else None
         return val
 
-    # ---- 裁剪交互 ----
-
-    def set_reference(self, img: Image.Image | None):
-        self._ref_img = img
-
-    def refresh_for_selection(self):
-        """文件列表选中变化时：刷新参考图与单独裁剪信息。"""
-        self.set_reference(self._get_reference_image() if self._get_reference_image else None)
-        self._update_info()
-
-    def set_rect(self, rect: tuple | None):
-        self._rect = rect
-        self._update_info()
-        self._notify()
-
-    def set_file_rect(self, path: str, rect: tuple | None):
-        """设置/清除某张图片的单独裁剪区域。"""
-        key = str(Path(path).resolve()).lower() if path else ""
-        if key and rect is not None:
-            self._file_rects[key] = rect
-        else:
-            self._file_rects.pop(key, None)
-        self._update_info()
-        self._notify()
-
-    def _notify(self):
-        if self._on_change:
-            self._on_change()
-
-    def _current_file_key(self) -> str:
-        path = self._get_reference_path() if self._get_reference_path else None
-        return str(Path(path).resolve()).lower() if path else ""
-
-    def _current_rect(self) -> tuple | None:
-        if self.scope_combo.currentIndex() == 1:
-            key = self._current_file_key()
-            return self._file_rects.get(key) if key else None
-        return self._rect
-
-    def clear_crop(self):
-        if self.scope_combo.currentIndex() == 1:
-            key = self._current_file_key()
-            if key:
-                self._file_rects.pop(key, None)
-        else:
-            self._rect = None
-        self._update_info()
-        self._notify()
-
-    def _open_crop_dialog(self):
-        per_file = self.scope_combo.currentIndex() == 1
-        img = self._get_reference_image() if self._get_reference_image else None
-        if img is None:
-            InfoBar.warning(title="没有图片", content="请先添加图片，裁剪需要一张参考图",
-                            orient=Qt.Horizontal, isClosable=True,
-                            position=InfoBarPosition.TOP, duration=3000,
-                            parent=self.window())
-            return
-        key = ""
-        init = self._rect
-        if per_file:
-            key = self._current_file_key()
-            if not key:
-                InfoBar.warning(title="未选中图片", content="请在左侧列表选中要单独裁剪的图片",
-                                orient=Qt.Horizontal, isClosable=True,
-                                position=InfoBarPosition.TOP, duration=3000,
-                                parent=self.window())
-                return
-            init = self._file_rects.get(key)
-        self._ref_img = img
+    def _on_ratio_changed(self):
+        """切换比例/像素预设：批量区域与当前单图区域自动重适配。"""
         ratio = self.current_ratio()
         pt = self.current_pixel_target()
         if pt:
             ratio = pt[0] / pt[1]
-        dlg = CropDialog(img, ratio=ratio, pixel_target=pt,
-                         init_rel=init, parent=self.window())
-        if dlg.exec():
-            rect = dlg.rect_rel()
-            if per_file:
-                self._file_rects[key] = rect
-            else:
-                self._rect = rect
-            self.switch.setChecked(True)
-            self._update_info()
-            self._notify()
+        if ratio and self._ref_img:
+            if self._batch_rect:
+                self._batch_rect = self._refit(self._batch_rect, ratio)
+            key = self._key()
+            if key in self._own_rects and self._own_rects[key]:
+                self._own_rects[key] = self._refit(self._own_rects[key], ratio)
+        self._update_all()
+        self._notify()
 
-    def _update_info(self):
-        per_file = self.scope_combo.currentIndex() == 1
+    def _refit(self, rect: tuple, ratio: float) -> tuple:
+        if self._ref_img is None:
+            return rect
+        W, H = self._ref_img.size
+        x, y, w, h = rect
+        pw, ph = w * W, h * H
+        if pw / max(ph, 1e-6) > ratio:
+            pw = ph * ratio          # 太宽 → 收缩宽度
+        else:
+            ph = pw / ratio          # 太高 → 收缩高度
+        nw, nh = pw / W, ph / H
+        cx, cy = x + w / 2, y + h / 2
+        nx = min(max(cx - nw / 2, 0.0), 1 - nw)
+        ny = min(max(cy - nh / 2, 0.0), 1 - nh)
+        return (nx, ny, nw, nh)
+
+    # ---- 汇总显示 ----
+
+    def _update_all(self):
+        key = self._key()
+        idx = self._state_of(key) if key else 0
+        self.state_combo.blockSignals(True)
+        self.state_combo.setCurrentIndex(idx)
+        self.state_combo.blockSignals(False)
+        self.own_row.setVisible(idx == 1)
+        self.own_info.setVisible(idx == 1)
+
         pt = self.current_pixel_target()
         pt_txt = f"，输出统一缩放至 {pt[0]}×{pt[1]} px" if pt else ""
-        rect = self._current_rect()
-        if per_file:
-            if not rect:
-                self.preview_label.setPixmap(QPixmap())
-                self.info.setText(
-                    f"当前图片未设置单独裁剪：画框只对选中的这张生效"
-                    f"（已单独设置 {len(self._file_rects)} 张）")
-                return
-            x, y, w, h = rect
-            self.info.setText(
-                f"当前图片裁剪：x {x:.0%}，y {y:.0%}，宽 {w:.0%}，高 {h:.0%}{pt_txt}"
-                f"（已单独设置 {len(self._file_rects)} 张）")
+        if self._batch_rect:
+            x, y, w, h = self._batch_rect
+            self.batch_info.setText(
+                f"批量区域：x {x:.0%}，y {y:.0%}，宽 {w:.0%}，高 {h:.0%}{pt_txt}")
         else:
-            if not rect:
-                self.preview_label.setPixmap(QPixmap())
-                self.info.setText("未设置裁剪区域：点“手动裁剪…”在参考图上画框")
-                return
-            x, y, w, h = rect
+            self.batch_info.setText("未设置批量区域")
+        if idx == 1:
+            r = self._own_rects.get(key)
+            self.own_info.setText(
+                f"当前图片：x {r[0]:.0%}，y {r[1]:.0%}，宽 {r[2]:.0%}，高 {r[3]:.0%}"
+                if r else "当前图片：尚未画框（画框前这张不裁剪）")
+
+        path = self._get_reference_path() if self._get_reference_path else None
+        eff = self.effective_options(path) if path else None
+        summary = (f"已单独设置 {len(self._own_rects)} 张，不裁剪 {len(self._skip)} 张")
+        if not self.switch.isChecked():
+            self.preview_label.setPixmap(QPixmap())
+            self.info.setText(f"裁剪未启用。{summary}")
+        elif eff and eff.enabled and self._ref_img:
             self.info.setText(
-                f"裁剪区域：x {x:.0%}，y {y:.0%}，宽 {w:.0%}，高 {h:.0%}{pt_txt}")
-        if self._ref_img:
-            im = self._ref_img
-            W, H = im.size
-            box = (round(x * W), round(y * H), round((x + w) * W), round((y + h) * H))
-            crop = im.crop(box)
+                f"当前图片生效区域：x {eff.x:.0%}，y {eff.y:.0%}，"
+                f"宽 {eff.w:.0%}，高 {eff.h:.0%}{pt_txt}；{summary}")
+            W, H = self._ref_img.size
+            box = (round(eff.x * W), round(eff.y * H),
+                   round((eff.x + eff.w) * W), round((eff.y + eff.h) * H))
+            crop = self._ref_img.crop(box)
             crop.thumbnail((124, 91), Image.LANCZOS)
             self.preview_label.setPixmap(QPixmap.fromImage(ImageQt(crop)))
+        else:
+            self.preview_label.setPixmap(QPixmap())
+            self.info.setText(f"当前图片不裁剪。{summary}")
+
+    # ---- 对外选项 ----
 
     def options(self) -> P.CropOptions:
-        """批量裁剪选项（不含单独裁剪覆盖）。"""
-        r = self._rect
+        """批量裁剪选项（不含单图覆盖）。"""
+        r = self._batch_rect
         pt = self.current_pixel_target() or (0, 0)
         return P.CropOptions(
             enabled=self.switch.isChecked() and r is not None,
@@ -758,23 +930,33 @@ class CropSection(SectionBase):
         )
 
     def crop_overrides(self) -> dict:
-        """单独裁剪区域 → 按文件覆盖表（键为小写绝对路径，优先于批量）。"""
+        """按文件覆盖表（键为小写绝对路径）：单独区域 / 不裁剪。"""
         pt = self.current_pixel_target() or (0, 0)
-        return {
-            key: P.CropOptions(enabled=True, x=r[0], y=r[1], w=r[2], h=r[3],
-                               target_w=pt[0], target_h=pt[1])
-            for key, r in self._file_rects.items()
-        }
+        out = {}
+        for key in set(self._own_rects) | self._skip:
+            if key in self._skip:
+                out[key] = P.CropOptions(enabled=False,
+                                         target_w=pt[0], target_h=pt[1])
+            else:
+                r = self._own_rects[key]
+                out[key] = P.CropOptions(enabled=bool(r),
+                                         x=r[0] if r else 0.0,
+                                         y=r[1] if r else 0.0,
+                                         w=r[2] if r else 1.0,
+                                         h=r[3] if r else 1.0,
+                                         target_w=pt[0], target_h=pt[1])
+        return out
 
     def effective_options(self, path) -> P.CropOptions:
-        """某张图片实际生效的裁剪选项（单独 > 批量），实时预览用。"""
+        """某张图片实际生效的裁剪选项（单独/不裁剪 > 批量），实时预览用。"""
         key = str(Path(path).resolve()).lower() if path else ""
-        rect = self._file_rects.get(key, self._rect)
         pt = self.current_pixel_target() or (0, 0)
+        rect, _own = self._effective_rect(key)
+        if rect is None:
+            return P.CropOptions(enabled=False, target_w=pt[0], target_h=pt[1])
         return P.CropOptions(
-            enabled=self.switch.isChecked() and rect is not None,
-            x=rect[0] if rect else 0.0, y=rect[1] if rect else 0.0,
-            w=rect[2] if rect else 1.0, h=rect[3] if rect else 1.0,
+            enabled=self.switch.isChecked(),
+            x=rect[0], y=rect[1], w=rect[2], h=rect[3],
             target_w=pt[0], target_h=pt[1],
         )
 

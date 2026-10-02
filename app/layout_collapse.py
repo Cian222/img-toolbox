@@ -83,6 +83,7 @@ class CollapseWindow(QMainWindow):
         for card in (self.resize_s, self.crop_s, self.wm, self.fmt, self.ren):
             card.set_collapsible(follows_switch=True)
         self.files.selection_changed.connect(self.crop_s.refresh_for_selection)
+        self.crop_s.file_mark_changed.connect(self.files.set_file_mark)
         return scroll
 
     def collect_settings(self) -> P.ProcessSettings:

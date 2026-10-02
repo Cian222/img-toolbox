@@ -105,6 +105,7 @@ class ProcessorView(QWidget):
         self.splitter.addWidget(self.preview_column)
         self.files.selection_changed.connect(self.preview.schedule)
         self.files.selection_changed.connect(self.crop_s.refresh_for_selection)
+        self.crop_s.file_mark_changed.connect(self.files.set_file_mark)
 
         # 底部固定执行栏（横跨三栏）
         self.run_bar = RunBar(self.files.files, self.collect_settings)

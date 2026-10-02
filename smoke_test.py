@@ -60,22 +60,32 @@ wc.crop_s.set_reference(img1)
 wc.crop_s.set_rect((0.0, 0.0, 1.0, 1.0))
 wc.crop_s.ratio_combo.setCurrentIndex(1)   # 1:1
 app.processEvents()
-rx, ry, rw, rh = wc.crop_s._rect
+rx, ry, rw, rh = wc.crop_s._batch_rect
 assert abs(rw - 0.75) < 1e-6 and abs(rh - 1.0) < 1e-6 and abs(rx - 0.125) < 1e-6, \
     f"1:1 重适配失败: {wc.crop_s._rect}"
 print("比例重适配 OK", flush=True)
 wc.crop_s.set_rect((0.25, 0.25, 0.5, 0.5))
 
-# 回归：单独裁剪（仅选中图片，覆盖批量）
-wc.crop_s.scope_combo.setCurrentIndex(1)   # 仅选中图片
+# 回归：三态裁剪（跟随批量 / 单独区域 / 不裁剪）
+wc.crop_s.set_file_state(str(p1), "skip")
+assert not wc.crop_s.effective_options(str(p1)).enabled, "skip 状态未生效"
+assert wc.crop_s.effective_options(str(p2)).enabled, "p2 应回退批量"
+wc.crop_s.set_file_state(str(p1), "own")
 wc.crop_s.set_file_rect(str(p1), (0.0, 0.0, 0.5, 0.5))
 eff1 = wc.crop_s.effective_options(str(p1))
-eff2 = wc.crop_s.effective_options(str(p2))
 assert eff1.enabled and abs(eff1.w - 0.5) < 1e-6, f"单独裁剪未生效: {eff1}"
-assert eff2.enabled and abs(eff2.x - 0.25) < 1e-6, \
-    "未设置的图片应回退到批量区域"
-print("单独裁剪 OK（覆盖优先，其余走批量）", flush=True)
-wc.crop_s.scope_combo.setCurrentIndex(0)   # 切回批量
+wc.crop_s.set_file_state(str(p1), "follow")
+eff1 = wc.crop_s.effective_options(str(p1))
+assert eff1.enabled and abs(eff1.x - 0.25) < 1e-6, "follow 应回退批量"
+print("裁剪三态 OK", flush=True)
+
+# 回归：跳过处理（文件级，任何功能都不碰）
+wc.files.toggle_skip(str(p2))
+assert all(f.name != "测试图片B.png" for f in wc.files.files()), "跳过未生效"
+assert "跳过" in wc.files.count_label.text()
+wc.files.toggle_skip(str(p2))
+assert any(f.name == "测试图片B.png" for f in wc.files.files()), "恢复未生效"
+print("跳过开关 OK", flush=True)
 wc.wm.switch.setChecked(True)      # 自动展开
 wc.wm.text_edit.setText("测试水印 Demo")
 wc.wm.pos_combo.setCurrentIndex(8)
