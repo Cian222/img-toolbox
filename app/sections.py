@@ -741,6 +741,8 @@ class CropSection(SectionBase):
         self._own_rects.pop(key, None)
         if idx == 2:                 # 不裁剪
             self._skip.add(key)
+        elif idx == 1:               # 单独区域（允许先选状态、再画框）
+            self._own_rects.setdefault(key, None)
         self._emit_mark(key)
         self._update_all()
         self._notify()

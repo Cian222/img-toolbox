@@ -79,6 +79,19 @@ eff1 = wc.crop_s.effective_options(str(p1))
 assert eff1.enabled and abs(eff1.x - 0.25) < 1e-6, "follow 应回退批量"
 print("裁剪三态 OK", flush=True)
 
+# 回归：界面上直接切"单独区域"不会被弹回（允许先选状态、再画框）
+wc.crop_s.state_combo.setCurrentIndex(1)
+app.processEvents()
+assert wc.crop_s.state_combo.currentIndex() == 1, "单独区域被弹回跟随批量"
+assert not wc.crop_s.effective_options(str(p1)).enabled, "未画框前不应裁剪"
+wc.crop_s.set_file_rect(str(p1), (0.1, 0.1, 0.6, 0.6))
+eff1 = wc.crop_s.effective_options(str(p1))
+assert eff1.enabled and abs(eff1.w - 0.6) < 1e-6, "选状态后画框未生效"
+wc.crop_s.state_combo.setCurrentIndex(0)
+app.processEvents()
+assert wc.crop_s.state_combo.currentIndex() == 0, "切回跟随批量失败"
+print("单独区域选中 OK", flush=True)
+
 # 回归：跳过处理（文件级，任何功能都不碰）
 wc.files.toggle_skip(str(p2))
 assert all(f.name != "测试图片B.png" for f in wc.files.files()), "跳过未生效"
